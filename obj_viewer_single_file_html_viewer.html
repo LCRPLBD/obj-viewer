@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OBJ Viewer — SketchLab-like (single file)</title>
+  <style>
+    html,body{height:100%;margin:0;font-family:Inter,Segoe UI,Arial}
+    #app{height:100%;display:flex;flex-direction:column}
+    header{display:flex;align-items:center;gap:12px;padding:10px;background:#111;color:#fff}
+    header .brand{font-weight:700}
+    #viewer{flex:1;position:relative;background:#222}
+    canvas{display:block}
+    .ui{position:absolute;right:12px;top:12px;background:rgba(0,0,0,0.5);backdrop-filter:blur(6px);padding:8px;border-radius:8px;color:#fff}
+    .ui label{display:block;font-size:13px;margin:6px 0}
+    .dropzone{position:absolute;left:12px;top:12px;padding:10px;border-radius:8px;background:rgba(255,255,255,0.06);color:#fff}
+    input[type=file]{display:none}
+    button,select,input[type=range]{cursor:pointer}
+    .footer{padding:8px;font-size:13px;background:#0f0f0f;color:#ddd}
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div class="brand">OBJ Viewer</div>
+      <div style="opacity:.8">Drag & drop .obj (and optional .mtl) — SketchLab-like controls</div>
+    </header>
+
+    <div id="viewer">
+      <div class="dropzone">
+        <label for="fileInput" style="cursor:pointer">Choose .obj / drag files</label>
+        <input id="fileInput" type="file" accept=".obj,.mtl" multiple />
+        <div style="margin-top:8px;font-size:12px;opacity:.8">Or drop files anywhere on the viewer</div>
+      </div>
+
+      <div class="ui" id="uiPanel">
+        <label><input id="autoRotate" type="checkbox"/> Auto-rotate</label>
+        <label>Zoom (distance): <input id="zoomRange" type="range" min="0" max="200" value="70"/></label>
+        <label><input id="wireframe" type="checkbox"/> Wireframe</label>
+        <label>Exposure: <input id="exposure" type="range" min="0" max="2" step="0.01" value="1"/></label>
+        <label><button id="centerBtn">Center / Fit</button></label>
+        <label><button id="screenshotBtn">Screenshot</button></label>
+      </div>
+    </div>
+
+    <div class="footer">Tips: Use left-drag to orbit, scroll to zoom, right-drag to pan. Works with .obj + .mtl pair; for complex materials try converting to glTF.</div>
+  </div>
+
+  <!-- Three.js and loaders (non-module build) -->
+  <script src="https://unpkg.com/three@0.152.2/build/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.152.2/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://unpkg.com/three@0.152.2/examples/js/loaders/OBJLoader.js"></script>
+  <script src="https://unpkg.com/three@0.152.2/examples/js/loaders/MTLLoader.js"></script>
+
+  <script>
+    // Basic scene, camera, renderer
+    let scene, camera, renderer, controls, container;
+    let currentModel = null;
+
+    init();
+    animate();
+
+    function init(){
+      container = document.getElementById('viewer');
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x222222);
+
+      const fov = 45;
+      const aspect = container.clientWidth / container.clientHeight;
+      camera = new THREE.PerspectiveCamera(fov, aspect, 0.1, 2000);
+      camera.position.set(0, 20, 70);
+
+      renderer = new THREE.WebGLRenderer({antialias:true, preserveDrawingBuffer:true});
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(container.clientWidth, container.clientHeight);
+      renderer.outputEncoding = THREE.sRGBEncoding;
+      container.appendChild(renderer.domElement);
+
+      // Lights
+      const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+      hemi.position.set(0, 200, 0);
+      scene.add(hemi);
+
+      const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+      dir.position.set(0, 50, 50);
+      scene.add(dir);
+
+      // Grid and ground
+      const grid = new THREE.GridHelper(200, 40, 0x444444, 0x222222);
+      grid.material.opacity = 0.5;
+      grid.material.transparent = true;
+      scene.add(grid);
+
+      // Controls
+      controls = new THREE.OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+
+      // UI handlers
+      window.addEventListener('resize', onWindowResize);
+      setupUI();
+
+      // Drag & drop
+      ['dragenter','dragover'].forEach(e => container.addEventListener(e, ev => ev.preventDefault()));
+      ['drop'].forEach(e => container.addEventListener(e, handleDrop));
+
+      // Also accept file chooser
+      document.getElementById('fileInput').addEventListener('change', e => handleFiles(e.target.files));
+    }
+
+    function setupUI(){
+      const autoRotate = document.getElementById('autoRotate');
+      const wireframe = document.getElementById('wireframe');
+      const zoomRange = document.getElementById('zoomRange');
+      const exposure = document.getElementById('exposure');
+      const centerBtn = document.getElementById('centerBtn');
+      const screenshotBtn = document.getElementById('screenshotBtn');
+
+      autoRotate.addEventListener('change', () => controls.autoRotate = autoRotate.checked);
+      wireframe.addEventListener('change', ()=> setWireframe(wireframe.checked));
+      zoomRange.addEventListener('input', ()=> camera.position.setLength(Number(zoomRange.value)));
+      exposure.addEventListener('input', ()=> renderer.toneMappingExposure = Number(exposure.value));
+      centerBtn.addEventListener('click', ()=> fitCameraToObject(currentModel || scene, camera, controls));
+      screenshotBtn.addEventListener('click', ()=> {
+        const dataURL = renderer.domElement.toDataURL('image/png');
+        const a = document.createElement('a'); a.href = dataURL; a.download = 'screenshot.png'; a.click();
+      });
+    }
+
+    function onWindowResize(){
+      const w = container.clientWidth, h = container.clientHeight;
+      camera.aspect = w / h; camera.updateProjectionMatrix();
+      renderer.setSize(w,h);
+    }
+
+    function animate(){
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    // Handle files
+    function handleDrop(ev){
+      ev.preventDefault();
+      const files = ev.dataTransfer.files;
+      handleFiles(files);
+    }
+
+    function handleFiles(fileList){
+      // Map names to File
+      const files = Array.from(fileList);
+      if(files.length===0) return;
+
+      // Find .obj file
+      const objFile = files.find(f => f.name.toLowerCase().endsWith('.obj')) || files[0];
+      const mtlFile = files.find(f => f.name.toLowerCase().endsWith('.mtl')) || null;
+
+      if(mtlFile){
+        const mtlLoader = new THREE.MTLLoader();
+        mtlLoader.setResourcePath('');
+        mtlLoader.load(URL.createObjectURL(mtlFile), materials => {
+          materials.preload();
+          const objLoader = new THREE.OBJLoader();
+          objLoader.setMaterials(materials);
+          objLoader.load(URL.createObjectURL(objFile), obj => onModelLoaded(obj));
+        }, undefined, err => {
+          console.error('MTL load error', err);
+          // fallback load obj only
+          loadObjOnly(objFile);
+        });
+      } else {
+        loadObjOnly(objFile);
+      }
+    }
+
+    function loadObjOnly(objFile){
+      const objLoader = new THREE.OBJLoader();
+      objLoader.load(URL.createObjectURL(objFile), obj => onModelLoaded(obj), xhr => {}, err => console.error(err));
+    }
+
+    function onModelLoaded(obj){
+      // clear previous
+      if(currentModel) scene.remove(currentModel);
+
+      // compute bounding box and center
+      const bbox = new THREE.Box3().setFromObject(obj);
+      const size = bbox.getSize(new THREE.Vector3());
+      const center = bbox.getCenter(new THREE.Vector3());
+
+      // re-center the object
+      obj.position.x += (obj.position.x - center.x);
+      obj.position.y += (obj.position.y - center.y);
+      obj.position.z += (obj.position.z - center.z);
+
+      // scale to reasonable size if huge or tiny
+      const maxDim = Math.max(size.x, size.y, size.z);
+      if(maxDim > 0){
+        const scale = 30 / maxDim; // fit into 30 unit box
+        obj.scale.setScalar(scale);
+      }
+
+      currentModel = obj;
+      scene.add(obj);
+
+      fitCameraToObject(obj, camera, controls);
+    }
+
+    // Fit camera to object
+    function fitCameraToObject(object, camera, controls, offset = 1.25){
+      if(!object) return;
+      const box = new THREE.Box3().setFromObject(object);
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+
+      const maxSize = Math.max(size.x, size.y, size.z);
+      const fitHeightDistance = maxSize / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5)));
+      const fitWidthDistance = fitHeightDistance / camera.aspect;
+      const distance = offset * Math.max(fitHeightDistance, fitWidthDistance);
+
+      // compute new camera position
+      const dir = controls.target.clone()
+        .sub(camera.position)
+        .normalize()
+        .multiplyScalar(-1);
+
+      camera.position.copy(center);
+      camera.position.add(new THREE.Vector3(0, 0, distance));
+      camera.near = Math.max(0.1, distance / 100);
+      camera.far = distance * 100;
+      camera.updateProjectionMatrix();
+
+      controls.maxDistance = distance * 10;
+      controls.target.copy(center);
+      controls.update();
+
+      // update zoom UI if present
+      const zr = document.getElementById('zoomRange');
+      if(zr) zr.value = camera.position.length();
+    }
+
+    function setWireframe(enabled){
+      if(!currentModel) return;
+      currentModel.traverse(child => {
+        if(child.isMesh){
+          child.material && (child.material.wireframe = enabled);
+        }
+      });
+    }
+  </script>
+</body>
+</html>
